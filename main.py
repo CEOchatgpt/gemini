@@ -5,16 +5,36 @@ import subprocess
 import json
 import os
 import re
+import tempfile
 
 app = FastAPI(title="Instagram Hybrid Scraper")
 
+# مسیر فایل کوکی (از متغیر محیطی)
+COOKIES_CONTENT = os.getenv("INSTAGRAM_COOKIES", "")
+COOKIES_FILE = None
+
+def get_cookies_file():
+    """یک فایل موقت از محتوای کوکی‌ها می‌سازد و مسیر آن را برمی‌گرداند"""
+    global COOKIES_FILE
+    if COOKIES_FILE is None and COOKIES_CONTENT:
+        # ایجاد فایل موقت
+        fd, path = tempfile.mkstemp(suffix=".txt", text=True)
+        with os.fdopen(fd, 'w') as f:
+            f.write(COOKIES_CONTENT)
+        COOKIES_FILE = path
+    return COOKIES_FILE
+
 def scrape_with_gallery_dl(url: str):
-    """
-    استخراج ایمن لینک‌های عکس و ویدیو با gallery-dl با مکانیزم مستحکم‌تر خوانش متنی
-    """
+    """استخراج لینک‌ها با gallery-dl و کوکی‌ها"""
     try:
+        cmd = ["gallery-dl", "-j", url]
+        cookies_path = get_cookies_file()
+        if cookies_path:
+            cmd.insert(1, "--cookies")  # بعد از gallery-dl قرار می‌دهیم
+            cmd.insert(2, cookies_path)
+        
         result = subprocess.run(
-            ["gallery-dl", "-j", url],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -22,12 +42,10 @@ def scrape_with_gallery_dl(url: str):
         )
         
         media_list = []
-        # پیدا کردن تمامی آدرس‌های وب معتبر در خروجی متنی دستور
         urls = re.findall(r'https?://[^\s"\'\]\}]+', result.stdout)
         
         for item in urls:
             if "instagram" in item or "cdninstagram" in item:
-                # حذف کاراکترهای اسکیپ احتمالی
                 clean_item = item.replace('\\', '')
                 is_video = any(ext in clean_item.lower().split('?')[0] for ext in ['.mp4', '.m4v', '.mov'])
                 if not any(m['url'] == clean_item for m in media_list):
@@ -44,7 +62,7 @@ def scrape_with_gallery_dl(url: str):
 async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
     clean_url = url.split('?')[0]
 
-    # اولویت برای غیر ریلز با gallery-dl
+    # اولویت با gallery-dl برای غیر ریلز
     if "/reel/" not in url.lower() and "/reels/" not in url.lower():
         gallery_data = scrape_with_gallery_dl(url)
         if gallery_data:
@@ -53,7 +71,7 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
             else:
                 return JSONResponse(content={"type": "album", "data": gallery_data})
 
-    # استفاده از yt-dlp برای ریلز یا به عنوان بک‌آپ
+    # yt-dlp با کوکی‌ها
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -65,6 +83,11 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
         }
     }
     
+    # اضافه کردن کوکی به yt-dlp
+    cookies_path = get_cookies_file()
+    if cookies_path:
+        ydl_opts['cookiefile'] = cookies_path
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
