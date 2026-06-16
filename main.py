@@ -9,10 +9,10 @@ app = FastAPI(title="Instagram Hybrid Scraper")
 
 def scrape_with_gallery_dl(url: str):
     """
-    استخراج لینک‌های عکس و آلبوم با استفاده از gallery-dl
+    استخراج لینک‌های عکس و آلبوم با استفاده از gallery-dl به صورت ایمن
     """
     try:
-        # اجرای دستور gallery-dl برای گرفتن خروجی به صورت جی‌سون بدون دانلود فایل
+        # اجرای دستور برای گرفتن اطلاعات خام جی‌سون به صورت خط به خط
         result = subprocess.run(
             ["gallery-dl", "-j", url],
             stdout=subprocess.PIPE,
@@ -21,33 +21,41 @@ def scrape_with_gallery_dl(url: str):
             check=True
         )
         
-        # خروجی gallery-dl به صورت خط به خط جی‌سون آرایه‌ای است
-        raw_output = result.stdout.strip().split('\n')
         media_list = []
+        raw_output = result.stdout.strip().split('\n')
         
         for line in raw_output:
             if not line:
                 continue
-            data = json.loads(line)
-            # در خروجی نوع ۳ معمولاً لینک مستقیم فایل در اندیس ۲ قرار دارد
-            if isinstance(data, list) and len(data) >= 3:
-                file_url = data[2]
-                # تشخیص اینکه فایل ویدیو است یا عکس بر اساس پسوند
-                is_video = file_url.lower().endswith(('.mp4', '.m4v', '.mov'))
-                media_list.append({
-                    "url": file_url,
-                    "is_video": is_video
-                })
-        
+            try:
+                data = json.loads(line)
+                # بررسی ساختار خروجی استاندارد gallery-dl
+                if isinstance(data, list):
+                    # معمولاً اندیس آخر یا اندیسی که حاوی لینک cdn اینستاست مورد نظر ماست
+                    for item in data:
+                        if isinstance(item, str) and (item.startswith("http://") or item.startswith("https://")):
+                            if "instagram" in item or "cdninstagram" in item:
+                                is_video = item.lower().split('?')[0].endswith(('.mp4', '.m4v', '.mov'))
+                                # جلوگیری از افزودن لینک‌های تکراری یک اسلاید
+                                if not any(m['url'] == item for m in media_list):
+                                    media_list.append({
+                                        "url": item,
+                                        "is_video": is_video
+                                    })
+            except Exception:
+                continue
+                
         return media_list
+    except subprocess.CalledProcessError as ce:
+        print(f"gallery-dl CLI failed: {ce.stderr}")
+        return []
     except Exception as e:
-        print(f"gallery-dl Error: {str(e)}")
+        print(f"gallery-dl general error: {str(e)}")
         return []
 
 @app.get("/scrape")
 async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
-    # ۱. ابتدا شانس را به gallery-dl می‌دهیم چون کاروسل‌ها و عکس‌ها را عالی هندل می‌کند
-    # اگر لینک پست عادی، کاروسل، استوری یا هایلایت باشد
+    # ۱. اولویت با gallery-dl برای پست‌ها، استوری‌ها و آلبوم‌ها
     if "/p/" in url or "/stories/" in url:
         gallery_data = scrape_with_gallery_dl(url)
         if gallery_data:
@@ -56,7 +64,7 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
             else:
                 return JSONResponse(content={"type": "album", "data": gallery_data})
 
-    # ۲. اگر لینک ریلز بود یا gallery-dl نتوانست چیزی پیدا کند، سوییچ میکنیم روی yt-dlp
+    # ۲. سوییچ روی yt-dlp برای ریلز یا به عنوان لایه پشتیبان عکس‌ها
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -72,7 +80,7 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
-                raise HTTPException(status_code=404, detail="No info found")
+                raise HTTPException(status_code=404, detail="No info found via yt-dlp")
                 
             if info.get('_type') == 'playlist' or 'entries' in info:
                 media_list = []
@@ -92,5 +100,10 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
                 })
                 
     except Exception as e:
-        print(f"yt-dlp Fallback Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"All scrapers failed: {str(e)}")
+        print(f"yt-dlp Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Both scrapers failed to extract media.")
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
