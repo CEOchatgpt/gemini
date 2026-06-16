@@ -4,13 +4,12 @@ import yt_dlp
 import subprocess
 import json
 import os
-import re
 
 app = FastAPI(title="Instagram Hybrid Scraper")
 
 def scrape_with_gallery_dl(url: str):
     """
-    استخراج لینک‌های عکس و آلبوم با استفاده از gallery-dl به صورت امن
+    استخراج ایمن لینک‌های عکس و ویدیو با gallery-dl
     """
     try:
         result = subprocess.run(
@@ -33,7 +32,8 @@ def scrape_with_gallery_dl(url: str):
                     for item in data:
                         if isinstance(item, str) and (item.startswith("http://") or item.startswith("https://")):
                             if "instagram" in item or "cdninstagram" in item:
-                                is_video = item.lower().split('?')[0].endswith(('.mp4', '.m4v', '.mov'))
+                                # تشخیص ویدیو بر اساس ساختار اکستنشن یا پارامترها
+                                is_video = any(ext in item.lower().split('?')[0] for ext in ['.mp4', '.m4v', '.mov'])
                                 if not any(m['url'] == item for m in media_list):
                                     media_list.append({
                                         "url": item,
@@ -41,19 +41,17 @@ def scrape_with_gallery_dl(url: str):
                                     })
             except Exception:
                 continue
-                
         return media_list
     except Exception as e:
-        print(f"gallery-dl failed or skipped: {str(e)}")
+        print(f"gallery-dl failed: {str(e)}")
         return []
 
 @app.get("/scrape")
 async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
-    # تمیز کردن کوئری پارامترهای اضافی اینستاگرام برای پایداری بیشتر ابزارها
     clean_url = url.split('?')[0]
 
-    # ۱. اولویت اول برای تمام پست‌ها، آلبوم‌ها و استوری‌ها با gallery-dl است
-    if "/p/" in url or "/stories/" in url or "img_index" in url:
+    # اگر لینک ریلز نباشد، اولویت مطلق با gallery-dl است تا عکس‌ها و آلبوم‌ها بدون خطا استخراج شوند
+    if "/reel/" not in url.lower() and "/reels/" not in url.lower():
         gallery_data = scrape_with_gallery_dl(url)
         if gallery_data:
             if len(gallery_data) == 1:
@@ -61,14 +59,12 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
             else:
                 return JSONResponse(content={"type": "album", "data": gallery_data})
 
-    # ۲. سوییچ روی yt-dlp با فیلتر فرمت انعطاف‌پذیر جهت جلوگیری از ارور "There is no video"
-    # در این حالت اگر فرمت ویدیو پیدا نشود، به صورت خودکار به بهترین فرمت در دسترس سوییچ می‌کند
+    # لایه پردازش ریلز یا بک‌آپ پست‌ها با yt-dlp
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        # اصلاح فیلتر فرمت: اگر فرمت ویدیویی با صدا بود انتخاب کن، در غیر این صورت هر فرمتی (حتی عکس/جنرال) که بود را بگیر
         'format': 'best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]/best/bestvideo+bestaudio',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -92,9 +88,7 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
                 if media_list:
                     return JSONResponse(content={"type": "album", "data": media_list})
             
-            # استخراج اطلاعات برای پست تکی
             media_url = info.get('url')
-            # اگر آدرس فرمت‌ها موجود بود، بالاترین کیفیت را چک میکنیم
             if info.get('formats'):
                 media_url = info['formats'][-1].get('url', media_url)
                 
@@ -106,9 +100,8 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
             })
                 
     except Exception as e:
-        print(f"yt-dlp Fallback Error: {str(e)}")
-        
-        # 🌟 لایه نجات نهایی: اگر yt-dlp به خاطر نبودن ویدیو ارور داد، شانس آخر را دوباره به gallery-dl روی لینک اصلی می‌دهیم
+        print(f"yt-dlp error: {str(e)}")
+        # شانس آخر برای لینک‌هایی که از فیلتر بالا رد شده بودند
         fallback_data = scrape_with_gallery_dl(url)
         if fallback_data:
             if len(fallback_data) == 1:
@@ -116,7 +109,7 @@ async def scrape_instagram(url: str = Query(..., description="Instagram URL")):
             else:
                 return JSONResponse(content={"type": "album", "data": fallback_data})
                 
-        raise HTTPException(status_code=500, detail=f"All scrapers failed for this post. Reason: {str(e)}")
+        raise HTTPException(status_code=500, detail="Both scrapers failed to extract media.")
 
 if __name__ == "__main__":
     import uvicorn
